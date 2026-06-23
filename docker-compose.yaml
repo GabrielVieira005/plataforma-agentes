@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+
+  # ── Infraestrutura ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: memory
+    ports: ["5432:5432"]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # UI em http://localhost:15672
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports: ["8001:8000"]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_data:/root/.ollama
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+
+  # ── Microsserviços ──────────────────────────────────────────────
+  name-server:
+    build: ./name-server
+    ports: ["8000:8000"]
+
+  llm-gateway:
+    build: ./llm-gateway
+    ports: ["8002:8000"]
+    environment:
+      OLLAMA_URL: http://ollama:11434
+    depends_on: [ollama, name-server]
+
+  memory-service:
+    build: ./memory-service
+    ports: ["8003:8000"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql+asyncpg://agent:agent@postgres/memory
+    depends_on: [redis, postgres, name-server]
+
+  retrieval-service:
+    build: ./retrieval-service
+    ports: ["8004:8000"]
+    environment:
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+    depends_on: [chromadb, rabbitmq, name-server]
+
+  tool-registry:
+    build: ./tool-registry
+    ports: ["8005:8000"]
+    depends_on: [name-server]
+
+  agent-service:
+    build: ./agent-service
+    ports: ["8006:8000"]
+    environment:
+      LLM_GATEWAY_URL: http://llm-gateway:8000
+      MEMORY_SERVICE_URL: http://memory-service:8000
+      RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
+      TOOL_REGISTRY_URL: http://tool-registry:8000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on: [llm-gateway, memory-service, tool-registry, rabbitmq]
+
+  api-gateway:
+    build: ./api-gateway
+    ports: ["80:8000"]
+    environment:
+      AGENT_SERVICE_URL: http://agent-service:8000
+      NAME_SERVER_URL: http://name-server:8000
+    depends_on: [agent-service, name-server]
+
+volumes:
+  ollama_data:
