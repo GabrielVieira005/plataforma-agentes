@@ -12,6 +12,14 @@ from pydantic import BaseModel
 from typing import Any
 
 app = FastAPI(title="Tool Registry", version="1.0.0")
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Registro de ferramentas ────────────────────────────────────────
 

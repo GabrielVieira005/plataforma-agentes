@@ -27,9 +27,12 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
 provider = TracerProvider()
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True))
-)
+try:
+    provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True))
+    )
+except Exception:
+    pass  # Jaeger não está rodando, ignorar
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("agent-service")
 
@@ -42,6 +45,15 @@ TOOL_REGISTRY_URL   = os.getenv("TOOL_REGISTRY_URL",   "http://localhost:8005")
 MAX_ITERATIONS      = int(os.getenv("MAX_ITERATIONS", "5"))
 
 app = FastAPI(title="Agent Service", version="1.0.0")
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Modelos ────────────────────────────────────────────────────────
 

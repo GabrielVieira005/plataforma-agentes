@@ -10,6 +10,14 @@ from datetime import datetime, timedelta
 import asyncio
 
 app = FastAPI(title="Name Server", version="1.0.0")
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Registro em memória: { service_name: [{ url, last_heartbeat }] }
 registry: dict[str, list[dict]] = {}
