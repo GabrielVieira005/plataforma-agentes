@@ -22,7 +22,7 @@ services:
       - "15672:15672"   # UI em http://localhost:15672
 
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.23
     ports: ["8001:8000"]
 
   ollama:
@@ -47,6 +47,8 @@ services:
     ports: ["8002:8000"]
     environment:
       OLLAMA_URL: http://ollama:11434
+      NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://llm-gateway:8000
     depends_on: [ollama, name-server]
 
   memory-service:
@@ -54,7 +56,9 @@ services:
     ports: ["8003:8000"]
     environment:
       REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgresql+asyncpg://agent:agent@postgres/memory
+      DATABASE_URL: postgresql://agent:agent@postgres/memory
+      NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://memory-service:8000
     depends_on: [redis, postgres, name-server]
 
   retrieval-service:
@@ -64,11 +68,17 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://retrieval-service:8000
     depends_on: [chromadb, rabbitmq, name-server]
 
   tool-registry:
     build: ./tool-registry
     ports: ["8005:8000"]
+    environment:
+      NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://tool-registry:8000
+      RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
     depends_on: [name-server]
 
   agent-service:
@@ -79,9 +89,11 @@ services:
       MEMORY_SERVICE_URL: http://memory-service:8000
       RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
       TOOL_REGISTRY_URL: http://tool-registry:8000
+      NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://agent-service:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq/
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
-    depends_on: [llm-gateway, memory-service, tool-registry, rabbitmq]
+    depends_on: [llm-gateway, memory-service, tool-registry, rabbitmq, jaeger]
 
   api-gateway:
     build: ./api-gateway
@@ -89,6 +101,7 @@ services:
     environment:
       AGENT_SERVICE_URL: http://agent-service:8000
       NAME_SERVER_URL: http://name-server:8000
+      SERVICE_URL: http://api-gateway:8000
     depends_on: [agent-service, name-server]
 
 volumes:

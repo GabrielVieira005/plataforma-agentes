@@ -24,16 +24,14 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 
 # ── Telemetria ────────────────────────────────────────────────────
 
-OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-provider = TracerProvider()
-try:
+if OTEL_ENDPOINT:
+    provider = TracerProvider()
     provider.add_span_processor(
         BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True))
     )
-except Exception:
-    pass  # Jaeger não está rodando, ignorar
-trace.set_tracer_provider(provider)
+    trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("agent-service")
 
 # ── Config ────────────────────────────────────────────────────────
@@ -42,7 +40,13 @@ LLM_GATEWAY_URL     = os.getenv("LLM_GATEWAY_URL",     "http://localhost:8002")
 MEMORY_SERVICE_URL  = os.getenv("MEMORY_SERVICE_URL",  "http://localhost:8003")
 RETRIEVAL_SERVICE_URL = os.getenv("RETRIEVAL_SERVICE_URL", "http://localhost:8004")
 TOOL_REGISTRY_URL   = os.getenv("TOOL_REGISTRY_URL",   "http://localhost:8005")
+NAME_SERVER_URL     = os.getenv("NAME_SERVER_URL",     "http://localhost:8000")
+SERVICE_NAME        = os.getenv("SERVICE_NAME",        "agent-service")
+SERVICE_URL         = os.getenv("SERVICE_URL",         "http://localhost:8006")
+REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
 MAX_ITERATIONS      = int(os.getenv("MAX_ITERATIONS", "5"))
+
+registration_task: asyncio.Task | None = None
 
 app = FastAPI(title="Agent Service", version="1.0.0")
 
@@ -54,6 +58,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup():
+    global registration_task
+    registration_task = asyncio.create_task(_registration_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await _stop_registration()
 
 # ── Modelos ────────────────────────────────────────────────────────
 
@@ -103,15 +118,13 @@ async def chat(req: ChatRequest):
             # 3. Busca documentos relevantes no RAG para a pergunta atual
             retrieval_results = await _query_rag(client, req.message)
 
-            # 4. Salva mensagem do usuário
-            await _save_message(client, req.session_id, "user", req.message)
-
-            # 5. Ciclo agêntico
+            # 4. Ciclo agêntico
             response, iterations = await _agentic_loop(
                 client, req, history, retrieval_results, tools, span
             )
 
-            # 5. Salva resposta do assistente
+            # 5. Persiste apenas conversas concluídas com sucesso
+            await _save_message(client, req.session_id, "user", req.message)
             await _save_message(client, req.session_id, "assistant", response)
 
         return ChatResponse(
@@ -213,10 +226,11 @@ def _format_retrieval_results(results: list[dict]) -> str:
 def _parse_tool_call(content: str) -> dict | None:
     """Tenta extrair uma chamada de ferramenta do conteúdo do LLM."""
     content = content.strip()
-    if not content.startswith("{"):
+    start = content.find("{")
+    if start == -1:
         return None
     try:
-        data = json.loads(content)
+        data, _ = json.JSONDecoder().raw_decode(content[start:])
         if "action" in data:
             return data
     except json.JSONDecodeError:
@@ -247,7 +261,13 @@ async def _call_llm(client: httpx.AsyncClient, messages: list, model: str) -> di
         )
         r.raise_for_status()
         return r.json()["message"]
-    except httpx.ConnectError:
+    except httpx.HTTPStatusError as e:
+        status_code = 503 if e.response.status_code >= 500 else 502
+        raise HTTPException(
+            status_code=status_code,
+            detail=_response_detail(e.response, "LLM Gateway error"),
+        )
+    except httpx.RequestError:
         raise HTTPException(status_code=503, detail="LLM Gateway unavailable")
 
 
@@ -289,3 +309,37 @@ async def _invoke_tool(client: httpx.AsyncClient, tool_name: str, params: dict) 
         return r.json()
     except Exception as e:
         return {"error": str(e)}
+
+
+def _response_detail(response: httpx.Response, fallback: str) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            return str(data.get("detail") or data)
+    except ValueError:
+        pass
+    text = response.text.strip()
+    return text or fallback
+
+
+async def _registration_loop():
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{NAME_SERVER_URL}/register",
+                    json={"name": SERVICE_NAME, "url": SERVICE_URL},
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(REGISTRATION_INTERVAL_SECONDS)
+
+
+async def _stop_registration():
+    if registration_task is None:
+        return
+    registration_task.cancel()
+    try:
+        await registration_task
+    except asyncio.CancelledError:
+        pass

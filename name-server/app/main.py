@@ -83,6 +83,7 @@ async def get_service(name: str):
 
 @app.get("/health")
 async def health():
+    _evict_expired()
     return {"status": "ok", "registered_services": list(registry.keys())}
 
 
@@ -91,3 +92,5 @@ def _evict_expired():
     cutoff = datetime.utcnow() - timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
     for name in list(registry.keys()):
         registry[name] = [e for e in registry[name] if e["last_heartbeat"] > cutoff]
+        if not registry[name]:
+            del registry[name]
