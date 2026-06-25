@@ -5,6 +5,7 @@ Abstrai o provedor de LLM para os demais serviços.
 """
 
 import os
+import asyncio
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -20,8 +21,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def startup():
+    global registration_task
+    registration_task = asyncio.create_task(_registration_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await _stop_registration()
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "llama3.2")
+NAME_SERVER_URL = os.getenv("NAME_SERVER_URL", "http://localhost:8000")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "llm-gateway")
+SERVICE_URL = os.getenv("SERVICE_URL", "http://localhost:8002")
+REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
+
+registration_task: asyncio.Task | None = None
 
 
 class ChatRequest(BaseModel):
@@ -98,3 +116,26 @@ async def health():
         except Exception:
             ollama_ok = False
     return {"status": "ok" if ollama_ok else "degraded", "ollama": ollama_ok}
+
+
+async def _registration_loop():
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{NAME_SERVER_URL}/register",
+                    json={"name": SERVICE_NAME, "url": SERVICE_URL},
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(REGISTRATION_INTERVAL_SECONDS)
+
+
+async def _stop_registration():
+    if registration_task is None:
+        return
+    registration_task.cancel()
+    try:
+        await registration_task
+    except asyncio.CancelledError:
+        pass

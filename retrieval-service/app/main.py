@@ -8,7 +8,12 @@ import os
 import asyncio
 import uuid
 import json
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import inspect
+import hashlib
+import math
+import re
+import httpx
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import chromadb
 import aio_pika
@@ -26,24 +31,34 @@ app.add_middleware(
 CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8001"))
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
+NAME_SERVER_URL = os.getenv("NAME_SERVER_URL", "http://localhost:8000")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "retrieval-service")
+SERVICE_URL = os.getenv("SERVICE_URL", "http://localhost:8004")
+REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
+CHROMA_CONNECT_RETRIES = int(os.getenv("CHROMA_CONNECT_RETRIES", "30"))
+CHROMA_CONNECT_DELAY_SECONDS = float(os.getenv("CHROMA_CONNECT_DELAY_SECONDS", "1"))
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "384"))
 COLLECTION_NAME = "documents"
 
 chroma_client: chromadb.AsyncHttpClient = None
 collection = None
 rabbit_connection = None
+consumer_task: asyncio.Task | None = None
+registration_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
 async def startup():
-    global chroma_client, collection
-    chroma_client = chromadb.AsyncHttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-    collection = await chroma_client.get_or_create_collection(COLLECTION_NAME)
-    # Inicia consumidor RabbitMQ em background
-    asyncio.create_task(_start_consumer())
+    global chroma_client, collection, consumer_task, registration_task
+    chroma_client, collection = await _connect_chroma()
+    consumer_task = asyncio.create_task(_start_consumer())
+    registration_task = asyncio.create_task(_registration_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    await _cancel_task(consumer_task)
+    await _cancel_task(registration_task)
     if rabbit_connection:
         await rabbit_connection.close()
 
@@ -94,6 +109,7 @@ async def ingest_sync(req: IngestRequest):
         ids=ids,
         documents=[d.content for d in req.documents],
         metadatas=[d.metadata for d in req.documents],
+        embeddings=_embed_texts([d.content for d in req.documents]),
     )
     return {"status": "indexed", "ids": ids}
 
@@ -102,7 +118,7 @@ async def ingest_sync(req: IngestRequest):
 async def query(req: QueryRequest):
     """Busca semântica: retorna os documentos mais relevantes para a query."""
     results = await collection.query(
-        query_texts=[req.query],
+        query_embeddings=_embed_texts([req.query]),
         n_results=req.n_results,
     )
     documents = results["documents"][0] if results["documents"] else []
@@ -122,7 +138,7 @@ async def health():
         chroma_ok = True
     except Exception:
         chroma_ok = False
-    return {"chroma": chroma_ok}
+    return {"status": "ok" if chroma_ok else "degraded", "chroma": chroma_ok}
 
 
 # ── Consumidor RabbitMQ ────────────────────────────────────────────
@@ -144,6 +160,63 @@ async def _start_consumer():
                         ids=[doc_id],
                         documents=[data["content"]],
                         metadatas=[data.get("metadata", {})],
+                        embeddings=_embed_texts([data["content"]]),
                     )
     except Exception as e:
         print(f"[retrieval-service] RabbitMQ consumer error: {e}")
+
+
+async def _connect_chroma():
+    last_error = None
+    for _ in range(CHROMA_CONNECT_RETRIES):
+        try:
+            client = chromadb.AsyncHttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+            if inspect.isawaitable(client):
+                client = await client
+            docs = await client.get_or_create_collection(COLLECTION_NAME)
+            return client, docs
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(CHROMA_CONNECT_DELAY_SECONDS)
+    raise RuntimeError(f"Could not connect to ChromaDB: {last_error}")
+
+
+async def _registration_loop():
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{NAME_SERVER_URL}/register",
+                    json={"name": SERVICE_NAME, "url": SERVICE_URL},
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(REGISTRATION_INTERVAL_SECONDS)
+
+
+async def _cancel_task(task: asyncio.Task | None):
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    return [_embed_text(text) for text in texts]
+
+
+def _embed_text(text: str) -> list[float]:
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    tokens = re.findall(r"\w+", text.lower())
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        vector[index] += sign
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]

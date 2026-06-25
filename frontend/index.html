@@ -717,6 +717,7 @@
   const RETRIEVAL_URL = 'http://localhost:8004';
   const TOOLS_URL     = 'http://localhost:8005';
   const GATEWAY_URL   = 'http://localhost:8002';
+  const API_URL       = 'http://localhost';
   const NAMESERVER_URL= 'http://localhost:8000';
 
   const SERVICES = [
@@ -872,7 +873,7 @@ function renderMessages() {
     showTyping();
 
     try {
-      const res = await fetch(`${AGENT_URL}/chat`, {
+      const res = await fetch(`${API_URL}/agent/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: currentSession.id, message: text }),
@@ -893,7 +894,7 @@ function renderMessages() {
       }
     } catch (e) {
       removeTyping();
-      addMessage('agent', '⚠️ Não foi possível conectar ao agent-service. Verifique se está rodando na porta 8006.');
+      addMessage('agent', '⚠️ Não foi possível conectar ao api-gateway. Verifique se está rodando na porta 80.');
     }
 
     isLoading = false;
@@ -933,7 +934,7 @@ function renderMessages() {
       try {
         const res = await fetch(`${s.url}/health`, { signal: AbortSignal.timeout(3000) });
         const data = await res.json();
-        const ok = res.ok;
+        const ok = res.ok && data.status !== 'degraded';
         if (!ok) allOk = false;
 
         document.getElementById(`dot-${s.name}`).className = `service-indicator ${ok ? 'ok' : 'err'}`;

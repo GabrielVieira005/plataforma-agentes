@@ -60,7 +60,7 @@ Observabilidade:
 
 | Software | Versão | Link | Observação |
 |----------|--------|------|------------|
-| Python | 3.12+ | https://python.org/downloads | Marcar "Add Python to PATH" |
+| Python | 3.12 | https://python.org/downloads | Versão validada para todos os serviços, incluindo RAG |
 | Ollama | qualquer | https://ollama.com | LLM local |
 | Docker Desktop | qualquer | https://docker.com/products/docker-desktop | Para Redis, RabbitMQ, ChromaDB |
 | PostgreSQL | 16 | https://postgresql.org/download/windows | Instalar com pgAdmin |
@@ -97,7 +97,7 @@ docker run -d --name redis -p 6379:6379 redis:7-alpine
 docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management-alpine
 
 # ChromaDB (banco vetorial para RAG)
-docker run -d --name chromadb -p 8001:8000 chromadb/chroma:latest
+docker run -d --name chromadb -p 8001:8000 chromadb/chroma:0.5.23
 ```
 
 Verificar se subiram:

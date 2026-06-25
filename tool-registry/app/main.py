@@ -6,10 +6,13 @@ Ferramentas externas podem ser registradas dinamicamente.
 """
 
 import math
+import os
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Any
+import httpx
 
 app = FastAPI(title="Tool Registry", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +23,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+NAME_SERVER_URL = os.getenv("NAME_SERVER_URL", "http://localhost:8000")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "tool-registry")
+SERVICE_URL = os.getenv("SERVICE_URL", "http://localhost:8005")
+REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
+
+registration_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def startup():
+    global registration_task
+    registration_task = asyncio.create_task(_registration_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await _stop_registration()
 
 # ── Registro de ferramentas ────────────────────────────────────────
 
@@ -109,6 +130,29 @@ async def invoke_tool(req: InvokeRequest) -> dict:
 @app.get("/health")
 async def health():
     return {"status": "ok", "tool_count": len(_builtin_tools) + len(_external_tools)}
+
+
+async def _registration_loop():
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{NAME_SERVER_URL}/register",
+                    json={"name": SERVICE_NAME, "url": SERVICE_URL},
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(REGISTRATION_INTERVAL_SECONDS)
+
+
+async def _stop_registration():
+    if registration_task is None:
+        return
+    registration_task.cancel()
+    try:
+        await registration_task
+    except asyncio.CancelledError:
+        pass
 
 
 # ── Implementações built-in ────────────────────────────────────────

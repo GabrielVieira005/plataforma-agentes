@@ -7,10 +7,12 @@ Armazena e recupera histórico de conversação.
 
 import os
 import json
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import httpx
 import redis.asyncio as redis
 import asyncpg
 
@@ -26,22 +28,29 @@ app.add_middleware(
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://agent:agent@localhost/memory")
+NAME_SERVER_URL = os.getenv("NAME_SERVER_URL", "http://localhost:8000")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "memory-service")
+SERVICE_URL = os.getenv("SERVICE_URL", "http://localhost:8003")
+REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
 SHORT_TERM_TTL = 3600  # 1 hora no Redis
 
 redis_client: redis.Redis = None
 pg_pool: asyncpg.Pool = None
+registration_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, pg_pool
+    global redis_client, pg_pool, registration_task
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     pg_pool = await asyncpg.create_pool(DATABASE_URL)
     await _create_tables()
+    registration_task = asyncio.create_task(_registration_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    await _stop_registration()
     await redis_client.close()
     await pg_pool.close()
 
@@ -137,3 +146,26 @@ async def health():
     except Exception:
         pg_ok = False
     return {"redis": redis_ok, "postgres": pg_ok}
+
+
+async def _registration_loop():
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{NAME_SERVER_URL}/register",
+                    json={"name": SERVICE_NAME, "url": SERVICE_URL},
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(REGISTRATION_INTERVAL_SECONDS)
+
+
+async def _stop_registration():
+    if registration_task is None:
+        return
+    registration_task.cancel()
+    try:
+        await registration_task
+    except asyncio.CancelledError:
+        pass
