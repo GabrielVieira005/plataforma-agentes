@@ -694,8 +694,14 @@
       <div>
         <div class="rag-label">Ingerir documento</div>
         <textarea class="rag-input" id="ragIngestText" placeholder="Cole o conteúdo do documento aqui..."></textarea>
+        <button class="rag-btn" style="margin-top:8px; width:100%" onclick="ingestDocument()">Indexar documento</button>
       </div>
-      <button class="rag-btn" onclick="ingestDocument()">Indexar documento</button>
+
+      <div style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 10px;">
+        <div class="rag-label">Upload CSV</div>
+        <input type="file" id="ragCsvFile" accept=".csv" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background: var(--surface); color: var(--text);" />
+        <button class="rag-btn secondary" style="margin-top:8px; width:100%" onclick="uploadCsv()">Indexar CSV</button>
+      </div>
 
       <div style="border-top: 1px solid var(--border); padding-top: 10px;">
         <div class="rag-label">Busca semântica</div>
@@ -1003,6 +1009,47 @@ function renderMessages() {
         </div>
       `).join('');
     } catch {
+      results.innerHTML = '<div style="font-size:12px;color:var(--red)">retrieval-service offline.</div>';
+    }
+  }
+
+  async function uploadCsv() {
+    const input = document.getElementById('ragCsvFile');
+    if (!input.files || input.files.length === 0) {
+      showToast('Selecione um arquivo CSV para indexar.');
+      return;
+    }
+
+    const file = input.files[0];
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      showToast('Apenas arquivos CSV são suportados.');
+      return;
+    }
+
+    const results = document.getElementById('ragResults');
+    results.innerHTML = '<div style="font-size:12px;color:var(--muted)">Enviando CSV...</div>';
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch(`${RETRIEVAL_URL}/ingest/file`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.ok) {
+        showToast(`✓ CSV '${file.name}' indexado com sucesso!`);
+        input.value = '';
+        results.innerHTML = '<div style="font-size:12px;color:var(--green)">CSV indexado com sucesso.</div>';
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Erro ao indexar CSV.');
+        results.innerHTML = '<div style="font-size:12px;color:var(--red)">Erro ao indexar CSV.</div>';
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('retrieval-service offline ou erro no upload.');
       results.innerHTML = '<div style="font-size:12px;color:var(--red)">retrieval-service offline.</div>';
     }
   }

@@ -121,6 +121,17 @@ cd agent-service
 pip install -r requirements.txt
 ```
 
+Para rodar em todas as pastas ao mesmo tempo da raiz:
+```
+python -m pip install -r retrieval-service/requirements.txt
+python -m pip install -r tool-registry/requirements.txt
+python -m pip install -r agent-service/requirements.txt
+python -m pip install -r api-gateway/requirements.txt
+python -m pip install -r llm-gateway/requirements.txt
+python -m pip install -r memory-service/requirements.txt
+python -m pip install -r name-server/requirements.txt
+```
+
 Repetir para: `llm-gateway`, `memory-service`, `tool-registry`, `api-gateway`, `name-server`.
 
 Para o `retrieval-service`, instalar manualmente (evita compilação do C++):
@@ -364,6 +375,17 @@ curl -X POST http://localhost:8004/ingest/sync \
   -H "Content-Type: application/json" \
   -d '{"documents": [{"content": "FastAPI eh um framework Python moderno para construir APIs REST de alta performance.", "metadata": {"source": "docs"}}]}'
 ```
+
+### Ingerir URL no RAG
+
+**curl:**
+```bash
+curl -X POST http://localhost:8004/ingest/sync \
+  -H "Content-Type: application/json" \
+  -d '{"documents": [{"url": "https://example.com", "metadata": {"source": "web"}}]}'
+```
+
+Isso fará com que o serviço acesse a página, extraia o texto e o indexe no ChromaDB.
 
 ---
 

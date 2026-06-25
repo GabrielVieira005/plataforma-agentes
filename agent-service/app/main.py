@@ -77,6 +77,10 @@ Quando precisar usar uma ferramenta, responda EXATAMENTE neste formato JSON:
 
 Ferramentas disponíveis: {tools}
 
+Se o usuário fornecer um link, use a ferramenta fetch_url para acessar a página e extrair seu conteúdo.
+Se quiser responder com base em informações previamente indexadas, utilize a busca semântica com query_rag.
+Se quiser indexar dados tabulares (CSV), use a ferramenta ingest_csv com parâmetro 'url' ou 'csv_text'.
+
 Quando tiver a resposta final, responda normalmente em linguagem natural.
 NAO use JSON na resposta final."""
 
@@ -96,12 +100,15 @@ async def chat(req: ChatRequest):
             # 2. Recupera histórico da sessão
             history = await _get_history(client, req.session_id)
 
-            # 3. Salva mensagem do usuário
+            # 3. Busca documentos relevantes no RAG para a pergunta atual
+            retrieval_results = await _query_rag(client, req.message)
+
+            # 4. Salva mensagem do usuário
             await _save_message(client, req.session_id, "user", req.message)
 
-            # 4. Ciclo agêntico
+            # 5. Ciclo agêntico
             response, iterations = await _agentic_loop(
-                client, req, history, tools, span
+                client, req, history, retrieval_results, tools, span
             )
 
             # 5. Salva resposta do assistente
@@ -121,6 +128,7 @@ async def health():
         for name, url in [
             ("llm-gateway", LLM_GATEWAY_URL),
             ("memory-service", MEMORY_SERVICE_URL),
+            ("retrieval-service", RETRIEVAL_SERVICE_URL),
             ("tool-registry", TOOL_REGISTRY_URL),
         ]:
             try:
@@ -137,6 +145,7 @@ async def _agentic_loop(
     client: httpx.AsyncClient,
     req: ChatRequest,
     history: list[dict],
+    retrieval_results: list[dict],
     tools: list[dict],
     span,
 ) -> tuple[str, int]:
@@ -150,8 +159,15 @@ async def _agentic_loop(
     messages = [
         {"role": "system", "content": system},
         *history[-10:],              # últimas 10 mensagens de contexto
-        {"role": "user", "content": req.message},
     ]
+
+    if retrieval_results:
+        messages.append({
+            "role": "system",
+            "content": _format_retrieval_results(retrieval_results),
+        })
+
+    messages.append({"role": "user", "content": req.message})
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         with tracer.start_as_current_span(f"agent.iteration.{iteration}"):
@@ -181,6 +197,19 @@ async def _agentic_loop(
     return "Não consegui chegar a uma resposta após o número máximo de iterações.", MAX_ITERATIONS
 
 
+def _format_retrieval_results(results: list[dict]) -> str:
+    formatted = ["Documentos relevantes encontrados no RAG:"]
+    for index, item in enumerate(results, start=1):
+        content = item.get("content", "").strip()
+        metadata = item.get("metadata", {})
+        source = metadata.get("source", metadata.get("content_type", "desconhecido"))
+        snippet = content[:1200].replace("\n", " ")
+        formatted.append(
+            f"[{index}] fonte: {source} | trecho: {snippet}"
+        )
+    return "\n".join(formatted)
+
+
 def _parse_tool_call(content: str) -> dict | None:
     """Tenta extrair uma chamada de ferramenta do conteúdo do LLM."""
     content = content.strip()
@@ -196,6 +225,18 @@ def _parse_tool_call(content: str) -> dict | None:
 
 
 # ── Helpers de integração ─────────────────────────────────────────
+
+async def _query_rag(client: httpx.AsyncClient, query: str, n_results: int = 3) -> list[dict]:
+    try:
+        r = await client.post(
+            f"{RETRIEVAL_SERVICE_URL}/query",
+            json={"query": query, "n_results": n_results},
+        )
+        r.raise_for_status()
+        return r.json().get("results", [])
+    except Exception:
+        return []
+
 
 async def _call_llm(client: httpx.AsyncClient, messages: list, model: str) -> dict:
     """Chama o LLM Gateway. Levanta HTTPException em caso de falha (circuit breaker futuro)."""

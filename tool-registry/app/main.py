@@ -5,11 +5,19 @@ Ferramentas built-in: calculadora, consulta de data/hora.
 Ferramentas externas podem ser registradas dinamicamente.
 """
 
+import os
 import math
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from html.parser import HTMLParser
+import httpx
+import csv
+import io
+import base64
 from typing import Any
+
+RETRIEVAL_SERVICE_URL = os.getenv("RETRIEVAL_SERVICE_URL", "http://localhost:8004")
 
 app = FastAPI(title="Tool Registry", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +43,35 @@ _builtin_tools: dict[str, dict] = {
         "name": "get_datetime",
         "description": "Retorna a data e hora atual.",
         "parameters": {},
+        "type": "builtin",
+    },
+    "fetch_url": {
+        "name": "fetch_url",
+        "description": "Busca o conteúdo textual de uma URL e retorna um resumo extraído.",
+        "parameters": {
+            "url": "string — URL para acessar",
+            "max_chars": "integer — limite de caracteres no texto retornado (opcional)",
+        },
+        "type": "builtin",
+    },
+    "query_rag": {
+        "name": "query_rag",
+        "description": "Pesquisa semanticamente documentos indexados no RAG e retorna os resultados mais relevantes.",
+        "parameters": {
+            "query": "string — consulta para buscar nos documentos indexados",
+            "n_results": "integer — número de resultados a retornar (opcional, padrão 3)",
+        },
+        "type": "builtin",
+    },
+    "ingest_csv": {
+        "name": "ingest_csv",
+        "description": "Ingesta um CSV remoto (ou texto CSV) e indexa as linhas no RAG.",
+        "parameters": {
+                "csv_base64": "string — conteúdo do arquivo CSV codificado em base64 (recomendado)",
+                "csv_text": "string — conteúdo CSV em texto (alternativa)",
+                "filename": "string — nome do arquivo (opcional)",
+                "max_rows": "integer — limite de linhas a indexar (opcional)",
+        },
         "type": "builtin",
     },
 }
@@ -127,4 +164,119 @@ def _invoke_builtin(name: str, params: dict) -> dict:
     if name == "get_datetime":
         return {"datetime": datetime.now().isoformat(), "timezone": "local"}
 
+    if name == "fetch_url":
+        url = params.get("url")
+        max_chars = params.get("max_chars", 2000)
+        if not url:
+            return {"error": "Parâmetro 'url' é obrigatório."}
+        try:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                response = client.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; RAGTool/1.0; +https://example.com)",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    },
+                )
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                html = response.text
+                title, text = _extract_title_and_text(html)
+                snippet = text[:int(max_chars)].strip()
+                return {
+                    "url": url,
+                    "title": title,
+                    "content": snippet,
+                    "content_type": content_type,
+                }
+        except httpx.HTTPError as e:
+            return {"error": f"Falha ao acessar URL: {e}"}
+
+    if name == "query_rag":
+        query = params.get("query")
+        n_results = params.get("n_results", 3)
+        if not query:
+            return {"error": "Parâmetro 'query' é obrigatório."}
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{RETRIEVAL_SERVICE_URL}/query",
+                    json={"query": query, "n_results": int(n_results)},
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPError as e:
+            return {"error": f"Falha ao consultar RAG: {e}"}
+
+    if name == "ingest_csv":
+        url = params.get("url")
+        csv_text = params.get("csv_text")
+        max_rows = int(params.get("max_rows", 1000))
+        if not url and not csv_text:
+            return {"error": "Forneça 'url' ou 'csv_text' para ingest_csv."}
+        try:
+            if url:
+                with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                    r = client.get(url)
+                    r.raise_for_status()
+                    text = r.text
+                    source = url
+            else:
+                text = str(csv_text)
+                source = "inline-csv"
+
+            # Parse CSV
+            reader = csv.DictReader(io.StringIO(text))
+            docs = []
+            for i, row in enumerate(reader):
+                if i >= max_rows:
+                    break
+                parts = [f"{k}: {v}" for k, v in row.items()]
+                doc_text = "\n".join(parts)
+                docs.append({"content": doc_text, "metadata": {"source": source}})
+
+            if not docs:
+                return {"error": "CSV vazio ou sem cabeçalho"}
+
+            # Send to retrieval-service ingest sync
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.post(f"{RETRIEVAL_SERVICE_URL}/ingest/sync", json={"documents": docs})
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as e:
+            return {"error": f"Falha ao ingest CSV: {e}"}
+
     return {"error": "Unknown builtin"}
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._texts: list[str] = []
+        self._ignore = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "noscript"}:
+            self._ignore = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "noscript"}:
+            self._ignore = False
+
+    def handle_data(self, data):
+        if not self._ignore:
+            self._texts.append(data)
+
+    def get_text(self) -> str:
+        return " ".join(text.strip() for text in self._texts if text.strip())
+
+
+def _extract_title_and_text(html: str) -> tuple[str, str]:
+    title = ""
+    title_start = html.find("<title>")
+    title_end = html.find("</title>")
+    if title_start != -1 and title_end != -1 and title_start < title_end:
+        title = html[title_start + 7:title_end].strip()
+    parser = _HTMLTextExtractor()
+    parser.feed(html)
+    return title, parser.get_text()
