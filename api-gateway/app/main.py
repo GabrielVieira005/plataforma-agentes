@@ -26,10 +26,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-AGENT_SERVICE_URL  = os.getenv("AGENT_SERVICE_URL",  "http://localhost:8006")
-NAME_SERVER_URL    = os.getenv("NAME_SERVER_URL",     "http://localhost:8000")
-SERVICE_NAME       = os.getenv("SERVICE_NAME",        "api-gateway")
-SERVICE_URL        = os.getenv("SERVICE_URL",         "http://localhost")
+AGENT_SERVICE_URL     = os.getenv("AGENT_SERVICE_URL",     "http://localhost:8006")
+RETRIEVAL_SERVICE_URL = os.getenv("RETRIEVAL_SERVICE_URL", "http://localhost:8004")
+NAME_SERVER_URL       = os.getenv("NAME_SERVER_URL",       "http://localhost:8000")
+SERVICE_NAME          = os.getenv("SERVICE_NAME",          "api-gateway")
+SERVICE_URL           = os.getenv("SERVICE_URL",           "http://localhost")
 REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
 
 registration_task: asyncio.Task | None = None
@@ -148,6 +149,12 @@ async def proxy_agent(path: str, request: Request):
         )
 
 
+@app.api_route("/retrieval/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
+async def proxy_retrieval(path: str, request: Request):
+    """Proxy para o Retrieval Service."""
+    return await _proxy_request(request, RETRIEVAL_SERVICE_URL, path)
+
+
 @app.get("/services")
 async def proxy_services():
     """Lista todos os serviços registrados no name-server."""
@@ -167,6 +174,25 @@ async def health():
             }
         },
     }
+
+
+async def _proxy_request(request: Request, service_url: str, path: str):
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.request(
+                method=request.method,
+                url=f"{service_url}/{path}",
+                content=body,
+                headers={k: v for k, v in request.headers.items() if k != "host"},
+                params=dict(request.query_params),
+            )
+        return _proxy_response(r)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Upstream service unavailable."},
+        )
 
 
 def _proxy_response(response: httpx.Response):

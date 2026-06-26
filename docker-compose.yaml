@@ -100,6 +100,7 @@ services:
     ports: ["80:8000"]
     environment:
       AGENT_SERVICE_URL: http://agent-service:8000
+      RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://api-gateway:8000
     depends_on: [agent-service, name-server]
