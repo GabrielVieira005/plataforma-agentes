@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import httpx
+from .telemetry import setup_telemetry
 
 app = FastAPI(title="API Gateway", version="1.0.0")
 
@@ -34,6 +35,7 @@ SERVICE_URL           = os.getenv("SERVICE_URL",           "http://localhost")
 REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
 
 registration_task: asyncio.Task | None = None
+tracer = setup_telemetry(app, SERVICE_NAME)
 
 # ── Rate Limiting ─────────────────────────────────────────────────
 
@@ -113,40 +115,48 @@ agent_cb = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout=30)
 @app.api_route("/agent/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def proxy_agent(path: str, request: Request):
     """Proxy para o Agent Service com circuit breaker."""
-    if not agent_cb.allow_request():
-        return JSONResponse(
-            status_code=503,
-            content={
-                "detail": "Agent Service temporarily unavailable (circuit breaker open).",
-                "fallback": "Por favor, tente novamente em alguns segundos.",
-            },
-        )
-
-    body = await request.body()
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.request(
-                method=request.method,
-                url=f"{AGENT_SERVICE_URL}/{path}",
-                content=body,
-                headers={k: v for k, v in request.headers.items() if k != "host"},
-                params=dict(request.query_params),
+    with tracer.start_as_current_span("gateway.proxy_agent") as span:
+        span.set_attribute("proxy.upstream", "agent-service")
+        span.set_attribute("proxy.path", path)
+        span.set_attribute("circuit_breaker.state", agent_cb.state)
+        if not agent_cb.allow_request():
+            span.set_attribute("circuit_breaker.blocked", True)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Agent Service temporarily unavailable (circuit breaker open).",
+                    "fallback": "Por favor, tente novamente em alguns segundos.",
+                },
             )
-        if r.status_code >= 500:
-            agent_cb.record_failure()
-        else:
-            agent_cb.record_success()
-        return _proxy_response(r)
 
-    except (httpx.ConnectError, httpx.TimeoutException):
-        agent_cb.record_failure()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "detail": "Agent Service unavailable.",
-                "fallback": "O serviço está temporariamente indisponível.",
-            },
-        )
+        body = await request.body()
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.request(
+                    method=request.method,
+                    url=f"{AGENT_SERVICE_URL}/{path}",
+                    content=body,
+                    headers={k: v for k, v in request.headers.items() if k != "host"},
+                    params=dict(request.query_params),
+                )
+            span.set_attribute("http.response.status_code", r.status_code)
+            if r.status_code >= 500:
+                agent_cb.record_failure()
+                span.set_attribute("circuit_breaker.failure_recorded", True)
+            else:
+                agent_cb.record_success()
+            return _proxy_response(r)
+
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            span.record_exception(exc)
+            agent_cb.record_failure()
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Agent Service unavailable.",
+                    "fallback": "O serviço está temporariamente indisponível.",
+                },
+            )
 
 
 @app.api_route("/retrieval/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
@@ -177,22 +187,27 @@ async def health():
 
 
 async def _proxy_request(request: Request, service_url: str, path: str):
-    body = await request.body()
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.request(
-                method=request.method,
-                url=f"{service_url}/{path}",
-                content=body,
-                headers={k: v for k, v in request.headers.items() if k != "host"},
-                params=dict(request.query_params),
+    with tracer.start_as_current_span("gateway.proxy_request") as span:
+        span.set_attribute("proxy.upstream_url", service_url)
+        span.set_attribute("proxy.path", path)
+        body = await request.body()
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.request(
+                    method=request.method,
+                    url=f"{service_url}/{path}",
+                    content=body,
+                    headers={k: v for k, v in request.headers.items() if k != "host"},
+                    params=dict(request.query_params),
+                )
+            span.set_attribute("http.response.status_code", r.status_code)
+            return _proxy_response(r)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            span.record_exception(exc)
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Upstream service unavailable."},
             )
-        return _proxy_response(r)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Upstream service unavailable."},
-        )
 
 
 def _proxy_response(response: httpx.Response):

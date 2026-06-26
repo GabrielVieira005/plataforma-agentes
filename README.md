@@ -36,7 +36,7 @@ Browser (Frontend — http://localhost:3000)
    └──► tool-registry :8005      (calculadora, datetime, ferramentas externas)
 
 Observabilidade:
-   agent-service  →  Jaeger :16686  (rastreamento distribuído)
+   todos os serviços FastAPI  →  Jaeger :16686  (rastreamento distribuído)
    RabbitMQ UI    →  http://localhost:15672
 ```
 
@@ -512,8 +512,9 @@ sudo service redis-server start
 ### memory-service: erro de conexão com PostgreSQL
 Verificar se o PostgreSQL está rodando. No Windows, abrir o "Services" (services.msc) e procurar por `postgresql-x64-16`.
 
-### agent-service cai logo após iniciar
-O OpenTelemetry tenta conectar no Jaeger que não está rodando. O erro é silencioso mas derruba o processo. Verificar se o `try/except` está no bloco de telemetria do `main.py`.
+### OpenTelemetry não aparece no Jaeger
+Verificar se o `jaeger` está rodando no Docker Compose e se os serviços foram iniciados com `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317`.
+Depois gerar tráfego real, por exemplo chamando `/agent/chat` pelo gateway. O Jaeger só mostra serviços depois que eles exportam pelo menos um span.
 
 ### `pydantic-core` falha na instalação
 Ocorre quando o pip tenta compilar do zero. Usar versões com wheels pré-compilados:
@@ -567,6 +568,76 @@ docker compose down
 
 ---
 
+## Observabilidade (Entrega 6)
+
+O projeto usa OpenTelemetry para rastreamento distribuído e Jaeger para visualização.
+
+Serviços instrumentados:
+
+- `api-gateway`
+- `agent-service`
+- `llm-gateway`
+- `memory-service`
+- `retrieval-service`
+- `tool-registry`
+- `name-server`
+
+O que é rastreado automaticamente:
+
+- requisições FastAPI recebidas por cada serviço
+- chamadas HTTP feitas com `httpx`
+- propagação de contexto entre serviços via headers W3C Trace Context
+
+Spans manuais importantes:
+
+- `gateway.proxy_agent`
+- `gateway.proxy_request`
+- `agent.chat`
+- `agent.rag_query`
+- `agent.llm_call`
+- `agent.get_history`
+- `agent.save_message`
+- `agent.invoke_tool`
+- `llm.ollama_chat`
+- `memory.add_message`
+- `memory.get_messages`
+- `retrieval.ingest_sync`
+- `retrieval.ingest_async`
+- `retrieval.ingest_file`
+- `retrieval.query`
+- `tool.invoke`
+- `tool.invoke_builtin`
+- `registry.register`
+
+Para testar:
+
+```bash
+docker compose up --build
+curl -sS -X POST http://localhost/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"otel-test","message":"Com base nos documentos, responda algo simples sobre FastAPI."}'
+```
+
+Depois abrir:
+
+```text
+http://localhost:16686
+```
+
+No Jaeger, selecionar um serviço como `api-gateway` ou `agent-service` e clicar em **Find Traces**. Uma chamada de chat deve mostrar uma cadeia parecida com:
+
+```text
+api-gateway
+  → agent-service
+    → tool-registry
+    → retrieval-service
+    → memory-service
+    → llm-gateway
+      → ollama
+```
+
+---
+
 ## Status das entregas
 
 | Entrega | Descrição | Status |
@@ -576,7 +647,7 @@ docker compose down
 | 3 | memory-service (Redis + PostgreSQL) + retrieval-service (ChromaDB) | ✅ |
 | 4 | RabbitMQ para ingestão assíncrona de documentos | ✅ |
 | 5 | Dockerfiles + docker-compose.yaml | ✅ |
-| 6 | OpenTelemetry + Jaeger | ⏳ |
+| 6 | OpenTelemetry + Jaeger | ✅ |
 | 7 | Manifests Kubernetes | ⏳ |
 | 8 | Relatório técnico + vídeo de demonstração | ⏳ |
 

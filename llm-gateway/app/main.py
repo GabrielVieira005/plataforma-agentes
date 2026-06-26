@@ -10,6 +10,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Any
+from .telemetry import setup_telemetry
 
 app = FastAPI(title="LLM Gateway", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,7 @@ SERVICE_URL = os.getenv("SERVICE_URL", "http://localhost:8002")
 REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
 
 registration_task: asyncio.Task | None = None
+tracer = setup_telemetry(app, SERVICE_NAME)
 
 
 @app.on_event("startup")
@@ -62,27 +64,34 @@ async def chat(request: ChatRequest):
     Envia mensagens ao LLM local via Ollama e retorna a resposta.
     Outros serviços chamam APENAS este endpoint — nunca o Ollama diretamente.
     """
-    payload = {
-        "model": request.model,
-        "messages": request.messages,
-        "options": {
-            "temperature": request.temperature,
-            "num_predict": request.max_tokens,
-        },
-        "stream": False,
-    }
+    with tracer.start_as_current_span("llm.ollama_chat") as span:
+        span.set_attribute("llm.model", request.model)
+        span.set_attribute("llm.messages.count", len(request.messages))
+        span.set_attribute("llm.temperature", request.temperature)
+        span.set_attribute("llm.max_tokens", request.max_tokens)
+        payload = {
+            "model": request.model,
+            "messages": request.messages,
+            "options": {
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens,
+            },
+            "stream": False,
+        }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            response = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json=payload,
-            )
-            response.raise_for_status()
-        except httpx.ConnectError:
-            raise HTTPException(status_code=503, detail="Ollama unavailable")
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json=payload,
+                )
+                response.raise_for_status()
+            except httpx.ConnectError as exc:
+                span.record_exception(exc)
+                raise HTTPException(status_code=503, detail="Ollama unavailable")
+            except httpx.HTTPStatusError as e:
+                span.record_exception(e)
+                raise HTTPException(status_code=502, detail=str(e))
 
     data = response.json()
     return ChatResponse(

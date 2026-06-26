@@ -15,6 +15,7 @@ from typing import Optional
 import httpx
 import redis.asyncio as redis
 import asyncpg
+from .telemetry import setup_telemetry
 
 app = FastAPI(title="Memory Service", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +40,7 @@ SHORT_TERM_TTL = 3600  # 1 hora no Redis
 redis_client: redis.Redis = None
 pg_pool: asyncpg.Pool = None
 registration_task: asyncio.Task | None = None
+tracer = setup_telemetry(app, SERVICE_NAME)
 
 
 @app.on_event("startup")
@@ -58,17 +60,18 @@ async def shutdown():
 
 
 async def _create_tables():
-    async with pg_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-        """)
+    with tracer.start_as_current_span("memory.create_tables"):
+        async with pg_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+            """)
 
 
 # ── Modelos ────────────────────────────────────────────────────────
@@ -88,21 +91,25 @@ class AddMessageRequest(BaseModel):
 @app.post("/sessions/{session_id}/messages", status_code=201)
 async def add_message(session_id: str, req: AddMessageRequest):
     """Adiciona uma mensagem ao histórico (Redis + Postgres)."""
-    msg = {"role": req.message.role, "content": req.message.content}
+    with tracer.start_as_current_span("memory.add_message") as span:
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("message.role", req.message.role)
+        span.set_attribute("message.length", len(req.message.content))
+        msg = {"role": req.message.role, "content": req.message.content}
 
-    # Curto prazo: Redis (lista, TTL)
-    key = f"session:{session_id}:messages"
-    await redis_client.rpush(key, json.dumps(msg))
-    await redis_client.expire(key, SHORT_TERM_TTL)
+        # Curto prazo: Redis (lista, TTL)
+        key = f"session:{session_id}:messages"
+        await redis_client.rpush(key, json.dumps(msg))
+        await redis_client.expire(key, SHORT_TERM_TTL)
 
-    # Longo prazo: PostgreSQL
-    async with pg_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages(session_id, role, content) VALUES($1, $2, $3)",
-            session_id, req.message.role, req.message.content,
-        )
+        # Longo prazo: PostgreSQL
+        async with pg_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO messages(session_id, role, content) VALUES($1, $2, $3)",
+                session_id, req.message.role, req.message.content,
+            )
 
-    return {"status": "ok"}
+        return {"status": "ok"}
 
 
 @app.get("/sessions/{session_id}/messages")
@@ -112,26 +119,34 @@ async def get_messages(session_id: str, limit: int = 20, source: str = "redis"):
     source='redis' → curto prazo (últimas mensagens)
     source='postgres' → longo prazo (histórico completo)
     """
-    if source == "redis":
-        key = f"session:{session_id}:messages"
-        raw = await redis_client.lrange(key, -limit, -1)
-        return {"messages": [json.loads(m) for m in raw]}
+    with tracer.start_as_current_span("memory.get_messages") as span:
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("memory.source", source)
+        span.set_attribute("memory.limit", limit)
+        if source == "redis":
+            key = f"session:{session_id}:messages"
+            raw = await redis_client.lrange(key, -limit, -1)
+            span.set_attribute("memory.messages.count", len(raw))
+            return {"messages": [json.loads(m) for m in raw]}
 
-    async with pg_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT role, content FROM messages WHERE session_id=$1 ORDER BY id DESC LIMIT $2",
-            session_id, limit,
-        )
-    messages = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-    return {"messages": messages}
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT role, content FROM messages WHERE session_id=$1 ORDER BY id DESC LIMIT $2",
+                session_id, limit,
+            )
+        messages = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+        span.set_attribute("memory.messages.count", len(messages))
+        return {"messages": messages}
 
 
 @app.delete("/sessions/{session_id}")
 async def clear_session(session_id: str):
     """Limpa a memória de curto prazo de uma sessão."""
-    key = f"session:{session_id}:messages"
-    await redis_client.delete(key)
-    return {"status": "cleared"}
+    with tracer.start_as_current_span("memory.clear_session") as span:
+        span.set_attribute("session_id", session_id)
+        key = f"session:{session_id}:messages"
+        await redis_client.delete(key)
+        return {"status": "cleared"}
 
 
 @app.get("/health")
@@ -165,12 +180,18 @@ async def _registration_loop():
 
 async def _connect_postgres():
     last_error = None
-    for _ in range(DATABASE_CONNECT_RETRIES):
-        try:
-            return await asyncpg.create_pool(DATABASE_URL)
-        except Exception as e:
-            last_error = e
-            await asyncio.sleep(DATABASE_CONNECT_DELAY_SECONDS)
+    with tracer.start_as_current_span("memory.connect_postgres") as span:
+        span.set_attribute("db.system", "postgresql")
+        span.set_attribute("db.connect.retries", DATABASE_CONNECT_RETRIES)
+        for attempt in range(1, DATABASE_CONNECT_RETRIES + 1):
+            try:
+                pool = await asyncpg.create_pool(DATABASE_URL)
+                span.set_attribute("db.connect.attempt", attempt)
+                return pool
+            except Exception as e:
+                last_error = e
+                span.record_exception(e)
+                await asyncio.sleep(DATABASE_CONNECT_DELAY_SECONDS)
     raise RuntimeError(f"Could not connect to PostgreSQL: {last_error}")
 
 

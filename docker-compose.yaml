@@ -33,6 +33,8 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "16686:16686"  # UI
       - "4317:4317"    # OTLP gRPC
@@ -41,6 +43,11 @@ services:
   name-server:
     build: ./name-server
     ports: ["8000:8000"]
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: name-server
+    depends_on: [jaeger]
 
   llm-gateway:
     build: ./llm-gateway
@@ -49,7 +56,10 @@ services:
       OLLAMA_URL: http://ollama:11434
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://llm-gateway:8000
-    depends_on: [ollama, name-server]
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: llm-gateway
+    depends_on: [ollama, name-server, jaeger]
 
   memory-service:
     build: ./memory-service
@@ -59,7 +69,10 @@ services:
       DATABASE_URL: postgresql://agent:agent@postgres/memory
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://memory-service:8000
-    depends_on: [redis, postgres, name-server]
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: memory-service
+    depends_on: [redis, postgres, name-server, jaeger]
 
   retrieval-service:
     build: ./retrieval-service
@@ -70,7 +83,11 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq/
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://retrieval-service:8000
-    depends_on: [chromadb, rabbitmq, name-server]
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: retrieval-service
+      ANONYMIZED_TELEMETRY: "False"
+    depends_on: [chromadb, rabbitmq, name-server, jaeger]
 
   tool-registry:
     build: ./tool-registry
@@ -79,7 +96,10 @@ services:
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://tool-registry:8000
       RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
-    depends_on: [name-server]
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: tool-registry
+    depends_on: [name-server, jaeger]
 
   agent-service:
     build: ./agent-service
@@ -93,6 +113,8 @@ services:
       SERVICE_URL: http://agent-service:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq/
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: agent-service
     depends_on: [llm-gateway, memory-service, tool-registry, rabbitmq, jaeger]
 
   api-gateway:
@@ -103,7 +125,10 @@ services:
       RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
       NAME_SERVER_URL: http://name-server:8000
       SERVICE_URL: http://api-gateway:8000
-    depends_on: [agent-service, name-server]
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_ENVIRONMENT: local
+      SERVICE_NAME: api-gateway
+    depends_on: [agent-service, name-server, jaeger]
 
 volumes:
   ollama_data:

@@ -3,4 +3,9 @@ uvicorn[standard]==0.32.0
 httpx==0.27.2
 pydantic==2.9.2
 tenacity==9.0.0
+setuptools==80.9.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp-proto-grpc==1.27.0
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-instrumentation-httpx==0.48b0
 python-multipart==0.0.6

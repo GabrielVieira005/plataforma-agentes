@@ -17,22 +17,7 @@ import asyncio
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-
-# ── Telemetria ────────────────────────────────────────────────────
-
-OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-
-if OTEL_ENDPOINT:
-    provider = TracerProvider()
-    provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True))
-    )
-    trace.set_tracer_provider(provider)
-tracer = trace.get_tracer("agent-service")
+from .telemetry import setup_telemetry
 
 # ── Config ────────────────────────────────────────────────────────
 
@@ -49,6 +34,7 @@ MAX_ITERATIONS      = int(os.getenv("MAX_ITERATIONS", "5"))
 registration_task: asyncio.Task | None = None
 
 app = FastAPI(title="Agent Service", version="1.0.0")
+tracer = setup_telemetry(app, SERVICE_NAME)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -91,6 +77,15 @@ Quando precisar usar uma ferramenta, responda EXATAMENTE neste formato JSON:
 {{"action": "tool_name", "parameters": {{"param": "value"}}}}
 
 Ferramentas disponíveis: {tools}
+
+Regras para responder com documentos/RAG:
+- Quando houver documentos relevantes no contexto, use esses documentos como a principal fonte da resposta.
+- Se o documento tiver informação parcial, responda com o que ele permite afirmar e diga brevemente o que não aparece no documento.
+- Não diga que "não há informações suficientes" quando houver trechos que respondem parte da pergunta.
+- Não peça para o usuário tentar novamente se já houver algum dado útil nos documentos.
+- Não invente informações fora dos documentos. Se precisar inferir, deixe claro que é uma inferência.
+- Se o usuário perguntar "quais", "qual", "liste" ou "me responda com o que voce tem", liste objetivamente os itens encontrados.
+- Se a categoria perguntada pelo usuário não bater perfeitamente com o texto do documento, explique com cuidado. Exemplo: "O documento cita OpenTelemetry e Jaeger como ferramentas de observabilidade; ele não chama explicitamente esses itens de frameworks."
 
 Se o usuário fornecer um link, use a ferramenta fetch_url para acessar a página e extrair seu conteúdo.
 Se quiser responder com base em informações previamente indexadas, utilize a busca semântica com query_rag.
@@ -183,7 +178,8 @@ async def _agentic_loop(
     messages.append({"role": "user", "content": req.message})
 
     for iteration in range(1, MAX_ITERATIONS + 1):
-        with tracer.start_as_current_span(f"agent.iteration.{iteration}"):
+        with tracer.start_as_current_span("agent.iteration") as iteration_span:
+            iteration_span.set_attribute("agent.iteration", iteration)
             # Raciocínio: chama o LLM
             llm_response = await _call_llm(client, messages, req.model)
             content = llm_response.get("content", "")
@@ -198,6 +194,7 @@ async def _agentic_loop(
             # Ação: invoca a ferramenta
             tool_name = tool_call["action"]
             tool_params = tool_call.get("parameters", {})
+            iteration_span.set_attribute("tool.name", tool_name)
             observation = await _invoke_tool(client, tool_name, tool_params)
 
             # Adiciona raciocínio e observação ao histórico de contexto
@@ -211,7 +208,10 @@ async def _agentic_loop(
 
 
 def _format_retrieval_results(results: list[dict]) -> str:
-    formatted = ["Documentos relevantes encontrados no RAG:"]
+    formatted = [
+        "Documentos relevantes encontrados no RAG:",
+        "Use estes documentos para responder. Se forem parcialmente relevantes, responda com o que eles sustentam e indique a limitação sem recusar a resposta.",
+    ]
     for index, item in enumerate(results, start=1):
         content = item.get("content", "").strip()
         metadata = item.get("metadata", {})
@@ -241,74 +241,103 @@ def _parse_tool_call(content: str) -> dict | None:
 # ── Helpers de integração ─────────────────────────────────────────
 
 async def _query_rag(client: httpx.AsyncClient, query: str, n_results: int = 3) -> list[dict]:
-    try:
-        r = await client.post(
-            f"{RETRIEVAL_SERVICE_URL}/query",
-            json={"query": query, "n_results": n_results},
-        )
-        r.raise_for_status()
-        return r.json().get("results", [])
-    except Exception:
-        return []
+    with tracer.start_as_current_span("agent.rag_query") as span:
+        span.set_attribute("rag.n_results", n_results)
+        span.set_attribute("rag.query.length", len(query))
+        try:
+            r = await client.post(
+                f"{RETRIEVAL_SERVICE_URL}/query",
+                json={"query": query, "n_results": n_results},
+            )
+            r.raise_for_status()
+            results = r.json().get("results", [])
+            span.set_attribute("rag.results.count", len(results))
+            return results
+        except Exception as exc:
+            span.record_exception(exc)
+            return []
 
 
 async def _call_llm(client: httpx.AsyncClient, messages: list, model: str) -> dict:
     """Chama o LLM Gateway. Levanta HTTPException em caso de falha (circuit breaker futuro)."""
-    try:
-        r = await client.post(
-            f"{LLM_GATEWAY_URL}/chat",
-            json={"messages": messages, "model": model},
-        )
-        r.raise_for_status()
-        return r.json()["message"]
-    except httpx.HTTPStatusError as e:
-        status_code = 503 if e.response.status_code >= 500 else 502
-        raise HTTPException(
-            status_code=status_code,
-            detail=_response_detail(e.response, "LLM Gateway error"),
-        )
-    except httpx.RequestError:
-        raise HTTPException(status_code=503, detail="LLM Gateway unavailable")
+    with tracer.start_as_current_span("agent.llm_call") as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("llm.messages.count", len(messages))
+        try:
+            r = await client.post(
+                f"{LLM_GATEWAY_URL}/chat",
+                json={"messages": messages, "model": model},
+            )
+            r.raise_for_status()
+            return r.json()["message"]
+        except httpx.HTTPStatusError as e:
+            span.record_exception(e)
+            status_code = 503 if e.response.status_code >= 500 else 502
+            raise HTTPException(
+                status_code=status_code,
+                detail=_response_detail(e.response, "LLM Gateway error"),
+            )
+        except httpx.RequestError as e:
+            span.record_exception(e)
+            raise HTTPException(status_code=503, detail="LLM Gateway unavailable")
 
 
 async def _get_tools(client: httpx.AsyncClient) -> list[dict]:
-    try:
-        r = await client.get(f"{TOOL_REGISTRY_URL}/tools")
-        r.raise_for_status()
-        return r.json().get("tools", [])
-    except Exception:
-        return []
+    with tracer.start_as_current_span("agent.get_tools") as span:
+        try:
+            r = await client.get(f"{TOOL_REGISTRY_URL}/tools")
+            r.raise_for_status()
+            tools = r.json().get("tools", [])
+            span.set_attribute("tools.count", len(tools))
+            return tools
+        except Exception as exc:
+            span.record_exception(exc)
+            return []
 
 
 async def _get_history(client: httpx.AsyncClient, session_id: str) -> list[dict]:
-    try:
-        r = await client.get(f"{MEMORY_SERVICE_URL}/sessions/{session_id}/messages")
-        r.raise_for_status()
-        return r.json().get("messages", [])
-    except Exception:
-        return []
+    with tracer.start_as_current_span("agent.get_history") as span:
+        span.set_attribute("session_id", session_id)
+        try:
+            r = await client.get(f"{MEMORY_SERVICE_URL}/sessions/{session_id}/messages")
+            r.raise_for_status()
+            messages = r.json().get("messages", [])
+            span.set_attribute("memory.messages.count", len(messages))
+            return messages
+        except Exception as exc:
+            span.record_exception(exc)
+            return []
 
 
 async def _save_message(client: httpx.AsyncClient, session_id: str, role: str, content: str):
-    try:
-        await client.post(
-            f"{MEMORY_SERVICE_URL}/sessions/{session_id}/messages",
-            json={"session_id": session_id, "message": {"role": role, "content": content}},
-        )
-    except Exception:
-        pass  # Não bloqueia a resposta ao cliente
+    with tracer.start_as_current_span("agent.save_message") as span:
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("message.role", role)
+        span.set_attribute("message.length", len(content))
+        try:
+            await client.post(
+                f"{MEMORY_SERVICE_URL}/sessions/{session_id}/messages",
+                json={"session_id": session_id, "message": {"role": role, "content": content}},
+            )
+        except Exception as exc:
+            span.record_exception(exc)
+            pass  # Não bloqueia a resposta ao cliente
 
 
 async def _invoke_tool(client: httpx.AsyncClient, tool_name: str, params: dict) -> dict:
-    try:
-        r = await client.post(
-            f"{TOOL_REGISTRY_URL}/tools/invoke",
-            json={"tool_name": tool_name, "parameters": params},
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"error": str(e)}
+    with tracer.start_as_current_span("agent.invoke_tool") as span:
+        span.set_attribute("tool.name", tool_name)
+        span.set_attribute("tool.parameters.count", len(params))
+        try:
+            r = await client.post(
+                f"{TOOL_REGISTRY_URL}/tools/invoke",
+                json={"tool_name": tool_name, "parameters": params},
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            span.record_exception(e)
+            return {"error": str(e)}
 
 
 def _response_detail(response: httpx.Response, fallback: str) -> str:

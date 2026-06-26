@@ -20,6 +20,7 @@ import chromadb
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from .telemetry import setup_telemetry
 
 app = FastAPI(title="Retrieval Service", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +49,7 @@ collection = None
 rabbit_connection = None
 consumer_task: asyncio.Task | None = None
 registration_task: asyncio.Task | None = None
+tracer = setup_telemetry(app, SERVICE_NAME)
 
 
 @app.on_event("startup")
@@ -106,78 +108,90 @@ class _HTMLTextExtractor(HTMLParser):
 @app.post("/ingest", status_code=202)
 async def ingest_documents(req: IngestRequest):
     """Enfileira documentos para ingestão assíncrona via RabbitMQ."""
-    prepared_docs = await _prepare_documents(req)
-    async with await aio_pika.connect_robust(RABBITMQ_URL) as conn:
-        channel = await conn.channel()
-        queue = await channel.declare_queue("document_ingest", durable=True)
-        for doc in prepared_docs:
-            await channel.default_exchange.publish(
-                aio_pika.Message(
-                    body=json.dumps(doc).encode(),
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=queue.name,
-            )
-    return {"status": "queued", "count": len(prepared_docs)}
+    with tracer.start_as_current_span("retrieval.ingest_async") as span:
+        prepared_docs = await _prepare_documents(req)
+        span.set_attribute("documents.count", len(prepared_docs))
+        async with await aio_pika.connect_robust(RABBITMQ_URL) as conn:
+            channel = await conn.channel()
+            queue = await channel.declare_queue("document_ingest", durable=True)
+            for doc in prepared_docs:
+                await channel.default_exchange.publish(
+                    aio_pika.Message(
+                        body=json.dumps(doc).encode(),
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    ),
+                    routing_key=queue.name,
+                )
+        return {"status": "queued", "count": len(prepared_docs)}
 
 
 @app.post("/ingest/sync", status_code=201)
 async def ingest_sync(req: IngestRequest):
     """Ingestão síncrona para testes e frontend. Aceita 'content' ou 'url'."""
-    prepared_docs = await _prepare_documents(req)
-    ids = [str(uuid.uuid4()) for _ in prepared_docs]
-    documents = [d["content"] for d in prepared_docs]
-    await collection.add(
-        ids=ids,
-        documents=documents,
-        metadatas=[d["metadata"] for d in prepared_docs],
-        embeddings=_embed_texts(documents),
-    )
-    return {"status": "indexed", "ids": ids}
+    with tracer.start_as_current_span("retrieval.ingest_sync") as span:
+        prepared_docs = await _prepare_documents(req)
+        ids = [str(uuid.uuid4()) for _ in prepared_docs]
+        documents = [d["content"] for d in prepared_docs]
+        span.set_attribute("documents.count", len(documents))
+        await collection.add(
+            ids=ids,
+            documents=documents,
+            metadatas=[d["metadata"] for d in prepared_docs],
+            embeddings=_embed_texts(documents),
+        )
+        return {"status": "indexed", "ids": ids}
 
 
 @app.post("/ingest/file", status_code=201)
 async def ingest_file(file: UploadFile = File(...)):
     """Ingestão de arquivo único. Suporta CSV e texto simples."""
-    filename = file.filename or "uploaded"
-    content_type = file.content_type or "text/plain"
-    raw_bytes = await file.read()
-    try:
-        text = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw_bytes.decode("latin-1", errors="replace")
+    with tracer.start_as_current_span("retrieval.ingest_file") as span:
+        filename = file.filename or "uploaded"
+        content_type = file.content_type or "text/plain"
+        span.set_attribute("file.name", filename)
+        span.set_attribute("file.content_type", content_type)
+        raw_bytes = await file.read()
+        span.set_attribute("file.size", len(raw_bytes))
+        try:
+            text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw_bytes.decode("latin-1", errors="replace")
 
-    if filename.lower().endswith(".csv") or "csv" in content_type:
-        text = _csv_to_text(text)
-        metadata = {"source": filename, "content_type": "text/csv", "type": "csv"}
-    else:
-        metadata = {"source": filename, "content_type": content_type}
+        if filename.lower().endswith(".csv") or "csv" in content_type:
+            text = _csv_to_text(text)
+            metadata = {"source": filename, "content_type": "text/csv", "type": "csv"}
+        else:
+            metadata = {"source": filename, "content_type": content_type}
 
-    doc_id = str(uuid.uuid4())
-    await collection.add(
-        ids=[doc_id],
-        documents=[text],
-        metadatas=[metadata],
-        embeddings=_embed_texts([text]),
-    )
-    return {"status": "indexed", "id": doc_id, "filename": filename}
+        doc_id = str(uuid.uuid4())
+        await collection.add(
+            ids=[doc_id],
+            documents=[text],
+            metadatas=[metadata],
+            embeddings=_embed_texts([text]),
+        )
+        return {"status": "indexed", "id": doc_id, "filename": filename}
 
 
 @app.post("/query")
 async def query(req: QueryRequest):
     """Busca semântica: retorna os documentos mais relevantes para a query."""
-    results = await collection.query(
-        query_embeddings=_embed_texts([req.query]),
-        n_results=req.n_results,
-    )
-    documents = results["documents"][0] if results["documents"] else []
-    metadatas = results["metadatas"][0] if results["metadatas"] else []
-    return {
-        "results": [
-            {"content": doc, "metadata": meta}
-            for doc, meta in zip(documents, metadatas)
-        ]
-    }
+    with tracer.start_as_current_span("retrieval.query") as span:
+        span.set_attribute("rag.query.length", len(req.query))
+        span.set_attribute("rag.n_results", req.n_results)
+        results = await collection.query(
+            query_embeddings=_embed_texts([req.query]),
+            n_results=req.n_results,
+        )
+        documents = results["documents"][0] if results["documents"] else []
+        metadatas = results["metadatas"][0] if results["metadatas"] else []
+        span.set_attribute("rag.results.count", len(documents))
+        return {
+            "results": [
+                {"content": doc, "metadata": meta}
+                for doc, meta in zip(documents, metadatas)
+            ]
+        }
 
 
 @app.get("/health")
@@ -208,25 +222,30 @@ async def _prepare_documents(req: IngestRequest) -> list[dict]:
 
 
 async def _fetch_url_content(url: str) -> tuple[str, dict]:
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; RAGFetcher/1.0)",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-            )
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            if "text/html" in content_type:
-                text = _extract_text_from_html(response.text)
-            else:
-                text = response.text
-            metadata = {"source": url, "content_type": content_type}
-            return text, metadata
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=400, detail=f"Falha ao acessar URL '{url}': {exc}")
+    with tracer.start_as_current_span("retrieval.fetch_url") as span:
+        span.set_attribute("url", url)
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; RAGFetcher/1.0)",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    },
+                )
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                span.set_attribute("http.response.content_type", content_type)
+                if "text/html" in content_type:
+                    text = _extract_text_from_html(response.text)
+                else:
+                    text = response.text
+                span.set_attribute("document.length", len(text))
+                metadata = {"source": url, "content_type": content_type}
+                return text, metadata
+        except httpx.HTTPError as exc:
+            span.record_exception(exc)
+            raise HTTPException(status_code=400, detail=f"Falha ao acessar URL '{url}': {exc}")
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -258,29 +277,37 @@ async def _start_consumer():
         async with queue.iterator() as q:
             async for message in q:
                 async with message.process():
-                    data = json.loads(message.body)
-                    content = data["content"]
-                    doc_id = str(uuid.uuid4())
-                    await collection.add(
-                        ids=[doc_id],
-                        documents=[content],
-                        metadatas=[data.get("metadata", {})],
-                        embeddings=_embed_texts([content]),
-                    )
+                    with tracer.start_as_current_span("retrieval.consume_ingest_message") as span:
+                        data = json.loads(message.body)
+                        content = data["content"]
+                        doc_id = str(uuid.uuid4())
+                        span.set_attribute("document.length", len(content))
+                        await collection.add(
+                            ids=[doc_id],
+                            documents=[content],
+                            metadatas=[data.get("metadata", {})],
+                            embeddings=_embed_texts([content]),
+                        )
     except Exception as e:
         print(f"[retrieval-service] RabbitMQ consumer error: {e}")
 
 
 async def _connect_chroma():
     last_error = None
-    for _ in range(CHROMA_CONNECT_RETRIES):
-        try:
-            client = await chromadb.AsyncHttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-            docs = await client.get_or_create_collection(COLLECTION_NAME)
-            return client, docs
-        except Exception as e:
-            last_error = e
-            await asyncio.sleep(CHROMA_CONNECT_DELAY_SECONDS)
+    with tracer.start_as_current_span("retrieval.connect_chroma") as span:
+        span.set_attribute("chroma.host", CHROMA_HOST)
+        span.set_attribute("chroma.port", CHROMA_PORT)
+        span.set_attribute("chroma.collection", COLLECTION_NAME)
+        for attempt in range(1, CHROMA_CONNECT_RETRIES + 1):
+            try:
+                client = await chromadb.AsyncHttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+                docs = await client.get_or_create_collection(COLLECTION_NAME)
+                span.set_attribute("chroma.connect.attempt", attempt)
+                return client, docs
+            except Exception as e:
+                last_error = e
+                span.record_exception(e)
+                await asyncio.sleep(CHROMA_CONNECT_DELAY_SECONDS)
     raise RuntimeError(f"Could not connect to ChromaDB: {last_error}")
 
 
