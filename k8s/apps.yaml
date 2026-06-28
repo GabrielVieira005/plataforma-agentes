@@ -1,0 +1,648 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: plataforma-agentes
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: plataforma-agentes/frontend:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - cp /html/index.html /usr/share/nginx/html/index.html && cp /config/config.js /usr/share/nginx/html/config.js && nginx -g 'daemon off;'
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: frontend-config
+              mountPath: /config
+            - name: frontend-html
+              mountPath: /html
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: frontend-config
+          configMap:
+            name: frontend-config
+        - name: frontend-html
+          configMap:
+            name: frontend-html
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: plataforma-agentes
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: name-server
+  namespace: plataforma-agentes
+  labels:
+    app: name-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: name-server
+  template:
+    metadata:
+      labels:
+        app: name-server
+    spec:
+      containers:
+        - name: name-server
+          image: plataforma-agentes/name-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: name-server
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: name-server
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: name-server
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+  namespace: plataforma-agentes
+  labels:
+    app: llm-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-gateway
+  template:
+    metadata:
+      labels:
+        app: llm-gateway
+    spec:
+      containers:
+        - name: llm-gateway
+          image: plataforma-agentes/llm-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: llm-gateway
+            - name: SERVICE_URL
+              value: http://llm-gateway:8000
+            - name: OLLAMA_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OLLAMA_URL
+            - name: DEFAULT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: DEFAULT_MODEL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: llm-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-service
+  namespace: plataforma-agentes
+  labels:
+    app: memory-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memory-service
+  template:
+    metadata:
+      labels:
+        app: memory-service
+    spec:
+      containers:
+        - name: memory-service
+          image: plataforma-agentes/memory-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: memory-service
+            - name: SERVICE_URL
+              value: http://memory-service:8000
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: DATABASE_URL
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: REDIS_URL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memory-service
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: memory-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retrieval-service
+  namespace: plataforma-agentes
+  labels:
+    app: retrieval-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: retrieval-service
+  template:
+    metadata:
+      labels:
+        app: retrieval-service
+    spec:
+      containers:
+        - name: retrieval-service
+          image: plataforma-agentes/retrieval-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: retrieval-service
+            - name: SERVICE_URL
+              value: http://retrieval-service:8000
+            - name: CHROMA_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: CHROMA_HOST
+            - name: CHROMA_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: CHROMA_PORT
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_URL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+            - name: ANONYMIZED_TELEMETRY
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: ANONYMIZED_TELEMETRY
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval-service
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: retrieval-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tool-registry
+  namespace: plataforma-agentes
+  labels:
+    app: tool-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tool-registry
+  template:
+    metadata:
+      labels:
+        app: tool-registry
+    spec:
+      containers:
+        - name: tool-registry
+          image: plataforma-agentes/tool-registry:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: tool-registry
+            - name: SERVICE_URL
+              value: http://tool-registry:8000
+            - name: RETRIEVAL_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: RETRIEVAL_SERVICE_URL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tool-registry
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: tool-registry
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-service
+  namespace: plataforma-agentes
+  labels:
+    app: agent-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-service
+  template:
+    metadata:
+      labels:
+        app: agent-service
+    spec:
+      containers:
+        - name: agent-service
+          image: plataforma-agentes/agent-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: agent-service
+            - name: SERVICE_URL
+              value: http://agent-service:8000
+            - name: LLM_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: LLM_GATEWAY_URL
+            - name: MEMORY_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: MEMORY_SERVICE_URL
+            - name: RETRIEVAL_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: RETRIEVAL_SERVICE_URL
+            - name: TOOL_REGISTRY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: TOOL_REGISTRY_URL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-service
+  namespace: plataforma-agentes
+spec:
+  selector:
+    app: agent-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: plataforma-agentes
+  labels:
+    app: api-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: plataforma-agentes/api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: api-gateway
+            - name: SERVICE_URL
+              value: http://api-gateway:8000
+            - name: AGENT_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: AGENT_SERVICE_URL
+            - name: RETRIEVAL_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: RETRIEVAL_SERVICE_URL
+            - name: NAME_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: NAME_SERVER_URL
+            - name: LLM_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: LLM_GATEWAY_URL
+            - name: MEMORY_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: MEMORY_SERVICE_URL
+            - name: TOOL_REGISTRY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: TOOL_REGISTRY_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OTEL_ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: plataforma-agentes
+spec:
+  type: NodePort
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      nodePort: 30080

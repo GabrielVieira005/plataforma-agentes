@@ -552,19 +552,117 @@ docker start redis rabbitmq chromadb
 
 Para rodar toda a infraestrutura e serviços em containers:
 
-```powershell
+```bash
 docker compose up --build
 ```
 
+Frontend:
+
+```text
+http://localhost:3000
+```
+
+Testar gateway:
+
+```bash
+curl http://localhost/health
+curl http://localhost/health/services
+```
+
+Testar chat:
+
+```bash
+curl -sS -X POST http://localhost/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"docker-test","message":"Responda uma frase curta."}'
+```
+
 Baixar modelo no Ollama (apenas na primeira vez):
-```powershell
+```bash
 docker exec -it plataforma-agentes-ollama-1 ollama pull llama3.2
 ```
 
 Parar tudo:
-```powershell
+```bash
 docker compose down
 ```
+
+---
+
+## Kubernetes (Entrega 7)
+
+Os manifests ficam em `k8s/`.
+
+Antes de aplicar, confirme que o Kubernetes do Docker Desktop está ativo:
+
+```bash
+kubectl config get-contexts
+kubectl config use-context docker-desktop
+kubectl cluster-info
+```
+
+Se `kubectl` tentar acessar `localhost:8080` e falhar, o problema é o contexto do Kubernetes, não os manifests. Abra o Docker Desktop, vá em **Settings > Kubernetes**, habilite Kubernetes e espere o status ficar running.
+
+Kubernetes não faz build local das imagens automaticamente. Antes de aplicar os manifests, crie as imagens:
+
+```bash
+docker build -t plataforma-agentes/name-server:latest ./name-server
+docker build -t plataforma-agentes/llm-gateway:latest ./llm-gateway
+docker build -t plataforma-agentes/memory-service:latest ./memory-service
+docker build -t plataforma-agentes/retrieval-service:latest ./retrieval-service
+docker build -t plataforma-agentes/tool-registry:latest ./tool-registry
+docker build -t plataforma-agentes/agent-service:latest ./agent-service
+docker build -t plataforma-agentes/api-gateway:latest ./api-gateway
+docker build -t plataforma-agentes/frontend:latest ./frontend
+```
+
+Aplicar:
+
+```bash
+cd /Users/zk/Desktop/2026/es2/repo/plataforma-agentes
+kubectl apply -k k8s/
+kubectl get pods -n plataforma-agentes
+```
+
+Forma mais confiável para rodar localmente, em terminais separados:
+
+Terminal 1:
+
+```bash
+kubectl port-forward -n plataforma-agentes svc/frontend 3000:80
+```
+
+Terminal 2:
+
+```bash
+kubectl port-forward -n plataforma-agentes svc/api-gateway 8080:80
+```
+
+Abrir:
+
+```text
+http://localhost:3000
+```
+
+Testar:
+
+```bash
+curl http://localhost:3000
+curl http://localhost:8080/health
+curl http://localhost:8080/health/services
+curl -sS -X POST http://localhost:8080/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"k8s-test","message":"Responda uma frase curta."}'
+```
+
+Se alterar o `frontend-config`, reinicie o deployment e também reinicie o port-forward do frontend:
+
+```bash
+kubectl apply -k k8s/
+kubectl rollout restart deployment/frontend -n plataforma-agentes
+```
+
+Mais detalhes: `k8s/README.md`.
 
 ---
 
@@ -648,7 +746,7 @@ api-gateway
 | 4 | RabbitMQ para ingestão assíncrona de documentos | ✅ |
 | 5 | Dockerfiles + docker-compose.yaml | ✅ |
 | 6 | OpenTelemetry + Jaeger | ✅ |
-| 7 | Manifests Kubernetes | ⏳ |
+| 7 | Manifests Kubernetes | ✅ |
 | 8 | Relatório técnico + vídeo de demonstração | ⏳ |
 
 ---

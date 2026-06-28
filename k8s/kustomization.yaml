@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: plataforma-agentes
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - infra.yaml
+  - apps.yaml
+  - ingress.yaml
+  - ollama-model-job.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: frontend-html
+    files:
+      - index.html=frontend-index.html

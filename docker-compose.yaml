@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   # ── Infraestrutura ──────────────────────────────────────────────
@@ -124,11 +122,19 @@ services:
       AGENT_SERVICE_URL: http://agent-service:8000
       RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
       NAME_SERVER_URL: http://name-server:8000
+      LLM_GATEWAY_URL: http://llm-gateway:8000
+      MEMORY_SERVICE_URL: http://memory-service:8000
+      TOOL_REGISTRY_URL: http://tool-registry:8000
       SERVICE_URL: http://api-gateway:8000
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_ENVIRONMENT: local
       SERVICE_NAME: api-gateway
     depends_on: [agent-service, name-server, jaeger]
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: [api-gateway]
 
 volumes:
   ollama_data:

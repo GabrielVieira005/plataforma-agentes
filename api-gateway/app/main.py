@@ -30,9 +30,21 @@ app.add_middleware(
 AGENT_SERVICE_URL     = os.getenv("AGENT_SERVICE_URL",     "http://localhost:8006")
 RETRIEVAL_SERVICE_URL = os.getenv("RETRIEVAL_SERVICE_URL", "http://localhost:8004")
 NAME_SERVER_URL       = os.getenv("NAME_SERVER_URL",       "http://localhost:8000")
+LLM_GATEWAY_URL       = os.getenv("LLM_GATEWAY_URL",       "http://localhost:8002")
+MEMORY_SERVICE_URL    = os.getenv("MEMORY_SERVICE_URL",    "http://localhost:8003")
+TOOL_REGISTRY_URL     = os.getenv("TOOL_REGISTRY_URL",     "http://localhost:8005")
 SERVICE_NAME          = os.getenv("SERVICE_NAME",          "api-gateway")
 SERVICE_URL           = os.getenv("SERVICE_URL",           "http://localhost")
 REGISTRATION_INTERVAL_SECONDS = int(os.getenv("REGISTRATION_INTERVAL_SECONDS", "10"))
+
+HEALTH_TARGETS = {
+    "agent-service": AGENT_SERVICE_URL,
+    "llm-gateway": LLM_GATEWAY_URL,
+    "memory-service": MEMORY_SERVICE_URL,
+    "retrieval-service": RETRIEVAL_SERVICE_URL,
+    "tool-registry": TOOL_REGISTRY_URL,
+    "name-server": NAME_SERVER_URL,
+}
 
 registration_task: asyncio.Task | None = None
 tracer = setup_telemetry(app, SERVICE_NAME)
@@ -186,6 +198,23 @@ async def health():
     }
 
 
+@app.get("/health/services")
+async def services_health():
+    """Checks internal service health from inside the cluster/network."""
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        checks = await asyncio.gather(
+            *[
+                _check_service_health(client, name, url)
+                for name, url in HEALTH_TARGETS.items()
+            ]
+        )
+    services = {item["name"]: item for item in checks}
+    return {
+        "status": "ok" if all(item["ok"] for item in checks) else "degraded",
+        "services": services,
+    }
+
+
 async def _proxy_request(request: Request, service_url: str, path: str):
     with tracer.start_as_current_span("gateway.proxy_request") as span:
         span.set_attribute("proxy.upstream_url", service_url)
@@ -208,6 +237,36 @@ async def _proxy_request(request: Request, service_url: str, path: str):
                 status_code=503,
                 content={"detail": "Upstream service unavailable."},
             )
+
+
+async def _check_service_health(
+    client: httpx.AsyncClient,
+    name: str,
+    url: str,
+) -> dict:
+    try:
+        response = await client.get(f"{url}/health")
+        body = {}
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"status": response.text[:120] or "non-json"}
+        ok = response.is_success and body.get("status") != "degraded"
+        return {
+            "name": name,
+            "url": url,
+            "ok": ok,
+            "status": body.get("status", "online" if response.is_success else "error"),
+            "http_status": response.status_code,
+        }
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        return {
+            "name": name,
+            "url": url,
+            "ok": False,
+            "status": "offline",
+            "error": exc.__class__.__name__,
+        }
 
 
 def _proxy_response(response: httpx.Response):

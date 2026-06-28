@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plataforma-agentes-config
+  namespace: plataforma-agentes
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+  OTEL_ENVIRONMENT: kubernetes
+  NAME_SERVER_URL: http://name-server:8000
+  OLLAMA_URL: http://ollama:11434
+  DEFAULT_MODEL: llama3.2
+  REDIS_URL: redis://redis:6379
+  CHROMA_HOST: chromadb
+  CHROMA_PORT: "8000"
+  LLM_GATEWAY_URL: http://llm-gateway:8000
+  MEMORY_SERVICE_URL: http://memory-service:8000
+  RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
+  TOOL_REGISTRY_URL: http://tool-registry:8000
+  AGENT_SERVICE_URL: http://agent-service:8000
+  ANONYMIZED_TELEMETRY: "False"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: plataforma-agentes
+data:
+  config.js: |
+    window.PLATAFORMA_AGENTES_CONFIG = {
+      API_URL: 'http://localhost:8080',
+      HEALTH_URL: 'http://localhost:8080/health/services',
+      AGENT_URL: 'http://localhost:8006',
+      MEMORY_URL: 'http://localhost:8003',
+      TOOLS_URL: 'http://localhost:8005',
+      GATEWAY_URL: 'http://localhost:8002',
+      NAMESERVER_URL: 'http://localhost:8000',
+    };
