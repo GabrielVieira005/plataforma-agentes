@@ -909,7 +909,7 @@ function renderMessages() {
       }
     } catch (e) {
       removeTyping();
-      addMessage('agent', 'Não foi possível conectar ao api-gateway. Verifique se o gateway está exposto em 8080, 30080 ou na URL configurada.');
+      addMessage('agent', 'A chamada ao api-gateway falhou antes de receber resposta. Verifique se o port-forward do gateway ainda está ativo; se você reiniciou pods, pare e rode novamente: kubectl port-forward -n plataforma-agentes svc/api-gateway 8080:80.');
     }
 
     isLoading = false;

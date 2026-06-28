@@ -17,3 +17,12 @@ configMapGenerator:
   - name: frontend-html
     files:
       - index.html=frontend-index.html
+  - name: agent-service-code
+    files:
+      - main.py=agent-service-main.py
+  - name: api-gateway-code
+    files:
+      - main.py=api-gateway-main.py
+  - name: llm-gateway-code
+    files:
+      - main.py=llm-gateway-main.py

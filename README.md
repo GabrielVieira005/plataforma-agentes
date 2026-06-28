@@ -655,11 +655,32 @@ curl -sS -X POST http://localhost:8080/agent/chat \
   -d '{"session_id":"k8s-test","message":"Responda uma frase curta."}'
 ```
 
+Se `/health` estiver ok mas o chat no frontend disser que não conseguiu chamar o gateway, reinicie o port-forward do `api-gateway`. Depois de um rollout, o port-forward antigo pode ficar preso em um pod substituído:
+
+```bash
+# Ctrl+C no port-forward antigo primeiro
+kubectl port-forward -n plataforma-agentes svc/api-gateway 8080:80
+```
+
+Se o teste de chat retornar `504`, a chamada chegou ao gateway, mas o caminho `agent-service -> llm-gateway -> Ollama` excedeu o timeout configurado. Verifique:
+
+```bash
+kubectl logs -n plataforma-agentes deploy/llm-gateway --tail=160
+kubectl logs -n plataforma-agentes deploy/ollama --tail=160
+```
+
 Se alterar o `frontend-config`, reinicie o deployment e também reinicie o port-forward do frontend:
 
 ```bash
 kubectl apply -k k8s/
 kubectl rollout restart deployment/frontend -n plataforma-agentes
+```
+
+Durante o desenvolvimento local, alguns serviços Python também recebem código via ConfigMap para evitar imagens `:latest` antigas no Docker Desktop. Depois de alterar código de `agent-service`, `api-gateway` ou `llm-gateway` e aplicar os manifests, reinicie o deployment alterado:
+
+```bash
+kubectl apply -k k8s/
+kubectl rollout restart deployment/agent-service -n plataforma-agentes
 ```
 
 Mais detalhes: `k8s/README.md`.

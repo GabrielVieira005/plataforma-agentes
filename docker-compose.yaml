@@ -57,6 +57,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_ENVIRONMENT: local
       SERVICE_NAME: llm-gateway
+      OLLAMA_TIMEOUT_SECONDS: 240
     depends_on: [ollama, name-server, jaeger]
 
   memory-service:
@@ -113,6 +114,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_ENVIRONMENT: local
       SERVICE_NAME: agent-service
+      LLM_MAX_TOKENS: 384
+      LLM_REQUEST_TIMEOUT_SECONDS: 180
     depends_on: [llm-gateway, memory-service, tool-registry, rabbitmq, jaeger]
 
   api-gateway:
@@ -129,6 +132,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_ENVIRONMENT: local
       SERVICE_NAME: api-gateway
+      UPSTREAM_TIMEOUT_SECONDS: 210
     depends_on: [agent-service, name-server, jaeger]
 
   frontend:

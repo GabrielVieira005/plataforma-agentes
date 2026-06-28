@@ -17,6 +17,10 @@ data:
   RETRIEVAL_SERVICE_URL: http://retrieval-service:8000
   TOOL_REGISTRY_URL: http://tool-registry:8000
   AGENT_SERVICE_URL: http://agent-service:8000
+  LLM_MAX_TOKENS: "384"
+  LLM_REQUEST_TIMEOUT_SECONDS: "180"
+  OLLAMA_TIMEOUT_SECONDS: "240"
+  UPSTREAM_TIMEOUT_SECONDS: "210"
   ANONYMIZED_TELEMETRY: "False"
 ---
 apiVersion: v1

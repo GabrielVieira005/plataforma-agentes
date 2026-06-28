@@ -168,6 +168,14 @@ After the rollout, restart the frontend port-forward. A port-forward can break w
 kubectl port-forward -n plataforma-agentes svc/frontend 3000:80
 ```
 
+For the same local-development reason, `agent-service`, `api-gateway`, and `llm-gateway` can mount their `main.py` from ConfigMaps. ConfigMap content changes do not restart pods by themselves. After changing one of those services and running `kubectl apply -k k8s/`, restart the changed deployment:
+
+```bash
+kubectl rollout restart deployment/agent-service -n plataforma-agentes
+kubectl rollout restart deployment/api-gateway -n plataforma-agentes
+kubectl rollout restart deployment/llm-gateway -n plataforma-agentes
+```
+
 Verify:
 
 ```bash
@@ -244,6 +252,24 @@ kubectl logs -n plataforma-agentes deploy/frontend --tail=100
 kubectl logs -n plataforma-agentes deploy/api-gateway --tail=100
 kubectl logs -n plataforma-agentes deploy/agent-service --tail=100
 kubectl logs -n plataforma-agentes deploy/llm-gateway --tail=100
+```
+
+If `/health` is green but chat hangs or the frontend says it could not reach the gateway, first restart the `api-gateway` port-forward. Port-forwards can stay attached to a replaced pod after a rollout:
+
+```bash
+# Ctrl+C the old api-gateway port-forward first
+kubectl port-forward -n plataforma-agentes svc/api-gateway 8080:80
+```
+
+Then test the chat path directly. A `504` means the request reached the platform but Ollama or the LLM path exceeded the configured timeout; check `llm-gateway` and `ollama` logs:
+
+```bash
+curl -i -X POST http://localhost:8080/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"k8s-debug","message":"Responda uma frase curta."}'
+
+kubectl logs -n plataforma-agentes deploy/llm-gateway --tail=160
+kubectl logs -n plataforma-agentes deploy/ollama --tail=160
 ```
 
 ## Optional Ingress

@@ -151,8 +151,16 @@ spec:
         - name: llm-gateway
           image: plataforma-agentes/llm-gateway:latest
           imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - cp /code/main.py /app/app/main.py && uvicorn app.main:app --host 0.0.0.0 --port 8000
           ports:
             - containerPort: 8000
+          volumeMounts:
+            - name: llm-gateway-code
+              mountPath: /code
           env:
             - name: SERVICE_NAME
               value: llm-gateway
@@ -168,6 +176,11 @@ spec:
                 configMapKeyRef:
                   name: plataforma-agentes-config
                   key: DEFAULT_MODEL
+            - name: OLLAMA_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: OLLAMA_TIMEOUT_SECONDS
             - name: NAME_SERVER_URL
               valueFrom:
                 configMapKeyRef:
@@ -196,6 +209,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: llm-gateway-code
+          configMap:
+            name: llm-gateway-code
 ---
 apiVersion: v1
 kind: Service
@@ -476,8 +493,16 @@ spec:
         - name: agent-service
           image: plataforma-agentes/agent-service:latest
           imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - cp /code/main.py /app/app/main.py && uvicorn app.main:app --host 0.0.0.0 --port 8000
           ports:
             - containerPort: 8000
+          volumeMounts:
+            - name: agent-service-code
+              mountPath: /code
           env:
             - name: SERVICE_NAME
               value: agent-service
@@ -508,6 +533,16 @@ spec:
                 configMapKeyRef:
                   name: plataforma-agentes-config
                   key: NAME_SERVER_URL
+            - name: LLM_MAX_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: LLM_MAX_TOKENS
+            - name: LLM_REQUEST_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: LLM_REQUEST_TIMEOUT_SECONDS
             - name: RABBITMQ_URL
               valueFrom:
                 secretKeyRef:
@@ -536,6 +571,10 @@ spec:
             limits:
               cpu: 1
               memory: 1Gi
+      volumes:
+        - name: agent-service-code
+          configMap:
+            name: agent-service-code
 ---
 apiVersion: v1
 kind: Service
@@ -571,8 +610,16 @@ spec:
         - name: api-gateway
           image: plataforma-agentes/api-gateway:latest
           imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - cp /code/main.py /app/app/main.py && uvicorn app.main:app --host 0.0.0.0 --port 8000
           ports:
             - containerPort: 8000
+          volumeMounts:
+            - name: api-gateway-code
+              mountPath: /code
           env:
             - name: SERVICE_NAME
               value: api-gateway
@@ -608,6 +655,11 @@ spec:
                 configMapKeyRef:
                   name: plataforma-agentes-config
                   key: TOOL_REGISTRY_URL
+            - name: UPSTREAM_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: plataforma-agentes-config
+                  key: UPSTREAM_TIMEOUT_SECONDS
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               valueFrom:
                 configMapKeyRef:
@@ -631,6 +683,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: api-gateway-code
+          configMap:
+            name: api-gateway-code
 ---
 apiVersion: v1
 kind: Service
